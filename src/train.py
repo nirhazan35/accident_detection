@@ -101,7 +101,7 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_loss_min = np.Inf
+        self.val_loss_min = np.inf
         
     def __call__(self, val_loss, model):
         score = -val_loss
@@ -144,24 +144,23 @@ def train_model(config):
     
     # Prepare dataloaders
     train_loader, val_loader, test_loader = prepare_dataloaders(
-        accident_dir=config['accident_dir'],
-        non_accident_dir=config['non_accident_dir'],
-        batch_size=config['batch_size'],
-        num_frames=config['num_frames'],
-        frame_interval=config['frame_interval'],
-        train_ratio=config['train_ratio'],
-        val_ratio=config['val_ratio'],
-        test_ratio=config['test_ratio'],
-        num_workers=config['num_workers']
+        accident_dir=config['data']['accident_dir'],
+        non_accident_dir=config['data']['non_accident_dir'],
+        batch_size=config['training']['batch_size'],
+        num_frames=config['data']['num_frames'],
+        frame_interval=config['data']['frame_interval'],
+        train_ratio=config['data']['train_ratio'],
+        val_ratio=config['data']['val_ratio'],
+        num_workers=config['training']['num_workers']
     )
     
     # Get model
-    model = get_model(config)
+    model = get_model(config['model'])
     model = model.to(device)
     
     # Loss function and optimizer
     criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'], weight_decay=config['training']['weight_decay'])
     
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -174,7 +173,7 @@ def train_model(config):
     
     # Early stopping
     early_stopping = EarlyStopping(
-        patience=config['early_stopping_patience'],
+        patience=config['training']['early_stopping_patience'],
         verbose=True,
         path=os.path.join(config['output_dir'], 'checkpoints', 'best_model.pt')
     )
@@ -189,14 +188,14 @@ def train_model(config):
     
     # Training loop
     start_time = time.time()
-    for epoch in range(config['num_epochs']):
+    for epoch in range(config['training']['num_epochs']):
         # Train
         model.train()
         train_loss = 0.0
         train_correct = 0
         train_total = 0
         
-        train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']} [Train]")
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['training']['num_epochs']} [Train]")
         for videos, labels in train_bar:
             videos, labels = videos.to(device), labels.to(device).float()
             
@@ -233,7 +232,7 @@ def train_model(config):
         val_targets = []
         
         with torch.no_grad():
-            val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']} [Valid]")
+            val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config['training']['num_epochs']} [Valid]")
             for videos, labels in val_bar:
                 videos, labels = videos.to(device), labels.to(device).float()
                 
@@ -270,7 +269,7 @@ def train_model(config):
         history['val_acc'].append(val_acc)
         
         # Print epoch summary
-        print(f"Epoch {epoch+1}/{config['num_epochs']} - "
+        print(f"Epoch {epoch+1}/{config['training']['num_epochs']} - "
               f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
               f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
         

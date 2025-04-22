@@ -43,15 +43,24 @@ class LSTMTransformerModel(nn.Module):
         # Feature extractor (CNN)
         if not use_pretrained_features:
             if cnn_model_name == "resnet18":
-                cnn = models.resnet18(pretrained=pretrained)
+                if pretrained:
+                    cnn = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+                else:
+                    cnn = models.resnet18(weights=None)
                 self.feature_extractor = nn.Sequential(*list(cnn.children())[:-1])
                 self.feature_dim = 512
             elif cnn_model_name == "resnet50":
-                cnn = models.resnet50(pretrained=pretrained)
+                if pretrained:
+                    cnn = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+                else:
+                    cnn = models.resnet50(weights=None)
                 self.feature_extractor = nn.Sequential(*list(cnn.children())[:-1])
                 self.feature_dim = 2048
             elif cnn_model_name == "efficientnet_b0":
-                cnn = models.efficientnet_b0(pretrained=pretrained)
+                if pretrained:
+                    cnn = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+                else:
+                    cnn = models.efficientnet_b0(weights=None)
                 self.feature_extractor = nn.Sequential(*list(cnn.children())[:-1])
                 self.feature_dim = 1280
             else:
