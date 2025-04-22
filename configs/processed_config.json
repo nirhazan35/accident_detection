@@ -1,0 +1,34 @@
+{
+    "model": {
+        "cnn_model": "resnet18",
+        "pretrained": true,
+        "feature_dim": 512,
+        "hidden_dim": 256,
+        "num_lstm_layers": 1,
+        "num_transformer_layers": 2,
+        "num_heads": 8,
+        "dropout": 0.2,
+        "use_pretrained_features": false
+    },
+    "data": {
+        "accident_dir": "data/processed/train_accidents",
+        "non_accident_dir": "data/processed/train_non_accidents",
+        "num_frames": 32,
+        "frame_interval": 4,
+        "train_ratio": 0.7,
+        "val_ratio": 0.15,
+        "test_ratio": 0.15
+    },
+    "training": {
+        "batch_size": 8,
+        "num_epochs": 50,
+        "learning_rate": 0.001,
+        "weight_decay": 0.0001,
+        "early_stopping_patience": 7,
+        "save_interval": 5,
+        "num_workers": 4
+    },
+    "output_dir": "output/accident_detection",
+    "test_ratio": 0.15,
+    "save_interval": 5
+} 
