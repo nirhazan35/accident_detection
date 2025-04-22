@@ -41,40 +41,60 @@ accident_detection/
    pip install -r requirements.txt
    ```
 
-## Data Preparation
+## Data Preparation and Training
 
-1. Organize your videos into two folders:
-   - `data/accidents/` - Videos containing accidents
-   - `data/non_accidents/` - Videos without accidents
+The recommended workflow is to separate the validation and training steps:
 
-2. Run the video validation script to process and fix corrupted videos:
+### Step 1: Validate and Fix Videos
+
+First, process your raw videos to fix any corrupted files:
+
+```
+python src/validate_videos.py --accident_dir data/accidents --non_accident_dir data/non_accidents
+```
+
+This will:
+- Validate all videos in both directories
+- Fix corrupted videos when possible
+- Create a clean dataset in `data/processed/`
+- Update your config.json to use the processed videos
+- Generate detailed reports on video validation
+
+After this step, your `config.json` will be updated to point to the validated videos.
+
+### Step 2: Train the Model
+
+Once validation is complete, train the model:
+
+```
+python src/train.py --config configs/config.json
+```
+
+The training process includes:
+- Data loading and preprocessing from validated videos
+- Model training with early stopping
+- Performance visualization
+- Model checkpointing
+
+The training output will be saved to the output directory, including:
+- Model checkpoints
+- Training history plots
+- Evaluation metrics
+- Final trained model
+
+### Alternative Workflows
+
+If needed, you can also:
+
+1. **Validate and train in one step**:
    ```
-   python src/validate_videos.py --accident_dir data/accidents --non_accident_dir data/non_accidents
+   python src/validate_videos.py --accident_dir data/accidents --non_accident_dir data/non_accidents --run_training
    ```
-
-   This will:
-   - Validate all videos in both directories
-   - Fix corrupted videos when possible
-   - Create a clean dataset in `data/processed/`
-   - Generate reports on video validation
-
-## Training
-
-1. Train the model using the processed data:
+   
+2. **Skip validation** (if you've already validated):
    ```
-   python src/train.py --config configs/processed_config.json
+   python src/validate_videos.py --skip_validation --run_training
    ```
-
-   The training process includes:
-   - Data loading and preprocessing
-   - Model training with early stopping
-   - Performance visualization
-   - Model checkpointing
-
-2. The training output will be saved to the directory specified in the config file, including:
-   - Model checkpoints
-   - Training history plots
-   - Evaluation metrics
 
 ## Running Real-Time Detection
 

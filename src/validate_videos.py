@@ -315,6 +315,88 @@ def process_video_directory(src_dir, valid_dir, invalid_dir, fixed_dir, num_fram
     
     return stats, results
 
+def update_config(config_path, train_accident_dir, train_non_accident_dir):
+    """
+    Update the configuration file to use the processed video directories
+    
+    Args:
+        config_path (str): Path to config file
+        train_accident_dir (str): Path to processed accident videos
+        train_non_accident_dir (str): Path to processed non-accident videos
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Read the configuration file
+        if not os.path.exists(config_path):
+            logger.error(f"Config file not found: {config_path}")
+            return False
+            
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Update the data paths
+        if 'data' not in config:
+            config['data'] = {}
+            
+        config['data']['accident_dir'] = train_accident_dir
+        config['data']['non_accident_dir'] = train_non_accident_dir
+        
+        # Backup original config
+        backup_path = f"{config_path}.bak"
+        if not os.path.exists(backup_path):
+            shutil.copy2(config_path, backup_path)
+            logger.info(f"Created backup of original config at {backup_path}")
+        
+        # Write updated config
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+            
+        logger.info(f"Updated config file at {config_path}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error updating config file: {str(e)}")
+        return False
+
+def run_training(config_path):
+    """
+    Run the training script with the specified config
+    
+    Args:
+        config_path (str): Path to config file
+        
+    Returns:
+        int: Return code from the training process
+    """
+    import subprocess
+    import sys
+    
+    logger.info(f"Starting training with config: {config_path}")
+    
+    # Construct command to run training
+    train_script = os.path.join(os.path.dirname(__file__), "train.py")
+    
+    if not os.path.exists(train_script):
+        logger.error(f"Training script not found: {train_script}")
+        return 1
+    
+    cmd = [sys.executable, train_script, "--config", config_path]
+    
+    # Run the training process
+    try:
+        logger.info(f"Executing command: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, check=True)
+        logger.info(f"Training completed with return code: {proc.returncode}")
+        return proc.returncode
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Training failed with return code {e.returncode}: {str(e)}")
+        return e.returncode
+    except Exception as e:
+        logger.error(f"Error running training: {str(e)}")
+        return 1
+
 def main():
     parser = argparse.ArgumentParser(description="Validate and organize videos for accident detection")
     parser.add_argument("--accident_dir", type=str, default="data/accidents", 
@@ -329,6 +411,12 @@ def main():
                       help="Minimum number of valid frames for a valid video")
     parser.add_argument("--log_file", type=str, default="video_validation.log",
                       help="Log file path")
+    parser.add_argument("--config_path", type=str, default="configs/config.json",
+                      help="Path to configuration file to update")
+    parser.add_argument("--run_training", action="store_true",
+                      help="Run training after validation")
+    parser.add_argument("--skip_validation", action="store_true",
+                      help="Skip validation and just update config and run training")
     args = parser.parse_args()
     
     # Update log file
@@ -346,118 +434,148 @@ def main():
     # Create output directory structure
     os.makedirs(args.output_dir, exist_ok=True)
     
-    valid_accident_dir = os.path.join(args.output_dir, "valid_accidents")
-    invalid_accident_dir = os.path.join(args.output_dir, "invalid_accidents")
-    fixed_accident_dir = os.path.join(args.output_dir, "fixed_accidents")
-    
-    valid_non_accident_dir = os.path.join(args.output_dir, "valid_non_accidents")
-    invalid_non_accident_dir = os.path.join(args.output_dir, "invalid_non_accidents")
-    fixed_non_accident_dir = os.path.join(args.output_dir, "fixed_non_accidents")
-    
-    # Process accident videos
-    logger.info("\nProcessing accident videos...")
-    accident_stats, accident_results = process_video_directory(
-        args.accident_dir, 
-        valid_accident_dir, 
-        invalid_accident_dir, 
-        fixed_accident_dir,
-        args.num_frames
-    )
-    
-    # Process non-accident videos
-    logger.info("\nProcessing non-accident videos...")
-    non_accident_stats, non_accident_results = process_video_directory(
-        args.non_accident_dir, 
-        valid_non_accident_dir, 
-        invalid_non_accident_dir, 
-        fixed_non_accident_dir,
-        args.num_frames
-    )
-    
-    # Combine results for training
-    logger.info("\nPreparing training data...")
     train_accident_dir = os.path.join(args.output_dir, "train_accidents")
     train_non_accident_dir = os.path.join(args.output_dir, "train_non_accidents")
     
-    os.makedirs(train_accident_dir, exist_ok=True)
-    os.makedirs(train_non_accident_dir, exist_ok=True)
-    
-    # Copy valid and fixed accident videos to train directory
-    for video in os.listdir(valid_accident_dir):
-        try:
-            shutil.copy2(os.path.join(valid_accident_dir, video), 
-                        os.path.join(train_accident_dir, video))
-        except Exception as e:
-            logger.error(f"Error copying valid accident video {video}: {str(e)}")
-    
-    for video in os.listdir(fixed_accident_dir):
-        try:
-            # Only copy if the fix was successful (file exists and has content)
-            video_path = os.path.join(fixed_accident_dir, video)
-            if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
-                shutil.copy2(video_path, os.path.join(train_accident_dir, video))
-        except Exception as e:
-            logger.error(f"Error copying fixed accident video {video}: {str(e)}")
-    
-    # Copy valid and fixed non-accident videos to train directory
-    for video in os.listdir(valid_non_accident_dir):
-        try:
-            shutil.copy2(os.path.join(valid_non_accident_dir, video), 
-                        os.path.join(train_non_accident_dir, video))
-        except Exception as e:
-            logger.error(f"Error copying valid non-accident video {video}: {str(e)}")
-    
-    for video in os.listdir(fixed_non_accident_dir):
-        try:
-            # Only copy if the fix was successful
-            video_path = os.path.join(fixed_non_accident_dir, video)
-            if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
-                shutil.copy2(video_path, os.path.join(train_non_accident_dir, video))
-        except Exception as e:
-            logger.error(f"Error copying fixed non-accident video {video}: {str(e)}")
-    
-    # Save statistics
-    all_stats = {
-        "accident": accident_stats,
-        "non_accident": non_accident_stats,
-        "training_data": {
-            "accidents": len(os.listdir(train_accident_dir)),
-            "non_accidents": len(os.listdir(train_non_accident_dir))
+    if not args.skip_validation:
+        valid_accident_dir = os.path.join(args.output_dir, "valid_accidents")
+        invalid_accident_dir = os.path.join(args.output_dir, "invalid_accidents")
+        fixed_accident_dir = os.path.join(args.output_dir, "fixed_accidents")
+        
+        valid_non_accident_dir = os.path.join(args.output_dir, "valid_non_accidents")
+        invalid_non_accident_dir = os.path.join(args.output_dir, "invalid_non_accidents")
+        fixed_non_accident_dir = os.path.join(args.output_dir, "fixed_non_accidents")
+        
+        # Process accident videos
+        logger.info("\nProcessing accident videos...")
+        accident_stats, accident_results = process_video_directory(
+            args.accident_dir, 
+            valid_accident_dir, 
+            invalid_accident_dir, 
+            fixed_accident_dir,
+            args.num_frames
+        )
+        
+        # Process non-accident videos
+        logger.info("\nProcessing non-accident videos...")
+        non_accident_stats, non_accident_results = process_video_directory(
+            args.non_accident_dir, 
+            valid_non_accident_dir, 
+            invalid_non_accident_dir, 
+            fixed_non_accident_dir,
+            args.num_frames
+        )
+        
+        # Combine results for training
+        logger.info("\nPreparing training data...")
+        os.makedirs(train_accident_dir, exist_ok=True)
+        os.makedirs(train_non_accident_dir, exist_ok=True)
+        
+        # Copy valid and fixed accident videos to train directory
+        for video in os.listdir(valid_accident_dir):
+            try:
+                shutil.copy2(os.path.join(valid_accident_dir, video), 
+                            os.path.join(train_accident_dir, video))
+            except Exception as e:
+                logger.error(f"Error copying valid accident video {video}: {str(e)}")
+        
+        for video in os.listdir(fixed_accident_dir):
+            try:
+                # Only copy if the fix was successful (file exists and has content)
+                video_path = os.path.join(fixed_accident_dir, video)
+                if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                    shutil.copy2(video_path, os.path.join(train_accident_dir, video))
+            except Exception as e:
+                logger.error(f"Error copying fixed accident video {video}: {str(e)}")
+        
+        # Copy valid and fixed non-accident videos to train directory
+        for video in os.listdir(valid_non_accident_dir):
+            try:
+                shutil.copy2(os.path.join(valid_non_accident_dir, video), 
+                            os.path.join(train_non_accident_dir, video))
+            except Exception as e:
+                logger.error(f"Error copying valid non-accident video {video}: {str(e)}")
+        
+        for video in os.listdir(fixed_non_accident_dir):
+            try:
+                # Only copy if the fix was successful
+                video_path = os.path.join(fixed_non_accident_dir, video)
+                if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                    shutil.copy2(video_path, os.path.join(train_non_accident_dir, video))
+            except Exception as e:
+                logger.error(f"Error copying fixed non-accident video {video}: {str(e)}")
+        
+        # Save statistics
+        all_stats = {
+            "accident": accident_stats,
+            "non_accident": non_accident_stats,
+            "training_data": {
+                "accidents": len(os.listdir(train_accident_dir)),
+                "non_accidents": len(os.listdir(train_non_accident_dir))
+            }
         }
-    }
+        
+        try:
+            with open(os.path.join(args.output_dir, "validation_stats.json"), 'w') as f:
+                json.dump(all_stats, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error saving validation stats: {str(e)}")
+        
+        # Save detailed results
+        all_results = {
+            "accident": accident_results,
+            "non_accident": non_accident_results
+        }
+        
+        try:
+            with open(os.path.join(args.output_dir, "validation_results.json"), 'w') as f:
+                json.dump(all_results, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error saving validation results: {str(e)}")
+        
+        # Print summary
+        summary = "\n=== Video Validation Summary ===\n"
+        summary += f"Accident videos: {accident_stats['total']} total, {accident_stats['valid']} valid, {accident_stats['fixed']} fixed, {accident_stats['unfixable']} unfixable\n"
+        summary += f"Non-accident videos: {non_accident_stats['total']} total, {non_accident_stats['valid']} valid, {non_accident_stats['fixed']} fixed, {non_accident_stats['unfixable']} unfixable\n"
+        summary += f"\nTraining data prepared: {all_stats['training_data']['accidents']} accident videos and {all_stats['training_data']['non_accidents']} non-accident videos\n"
+        
+        logger.info(summary)
+        print(summary)
+    else:
+        logger.info("Skipping validation as requested. Will update config and run training directly.")
     
-    try:
-        with open(os.path.join(args.output_dir, "validation_stats.json"), 'w') as f:
-            json.dump(all_stats, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving validation stats: {str(e)}")
-    
-    # Save detailed results
-    all_results = {
-        "accident": accident_results,
-        "non_accident": non_accident_results
-    }
-    
-    try:
-        with open(os.path.join(args.output_dir, "validation_results.json"), 'w') as f:
-            json.dump(all_results, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving validation results: {str(e)}")
-    
-    # Print summary
-    summary = "\n=== Video Validation Summary ===\n"
-    summary += f"Accident videos: {accident_stats['total']} total, {accident_stats['valid']} valid, {accident_stats['fixed']} fixed, {accident_stats['unfixable']} unfixable\n"
-    summary += f"Non-accident videos: {non_accident_stats['total']} total, {non_accident_stats['valid']} valid, {non_accident_stats['fixed']} fixed, {non_accident_stats['unfixable']} unfixable\n"
-    summary += f"\nTraining data prepared: {all_stats['training_data']['accidents']} accident videos and {all_stats['training_data']['non_accidents']} non-accident videos\n"
-    summary += f"\nTo use the validated data for training, update your config.json with:\n"
-    summary += f'"accident_dir": "{os.path.abspath(train_accident_dir)}",\n'
-    summary += f'"non_accident_dir": "{os.path.abspath(train_non_accident_dir)}"\n'
-    
-    logger.info(summary)
-    print(summary)
+    # Update config file with processed data directories
+    if update_config(args.config_path, 
+                    os.path.abspath(train_accident_dir),
+                    os.path.abspath(train_non_accident_dir)):
+        logger.info(f"Successfully updated config file: {args.config_path}")
+        print(f"Config file updated to use processed videos: {args.config_path}")
+        
+        # Run training if requested
+        if args.run_training:
+            logger.info("Starting training process...")
+            ret_code = run_training(args.config_path)
+            
+            if ret_code == 0:
+                logger.info("Training completed successfully!")
+                print("\nTraining completed successfully!")
+            else:
+                logger.error(f"Training failed with return code: {ret_code}")
+                print(f"\nTraining failed with return code: {ret_code}")
+        else:
+            logger.info("To run training manually, use the command:")
+            cmd = f"python src/train.py --config {args.config_path}"
+            logger.info(cmd)
+            print(f"\nTo run training manually, use the command:\n{cmd}")
+    else:
+        logger.error("Failed to update config file.")
+        print("Failed to update config file. See log for details.")
     
     # Return stats for programmatic use
-    return all_stats
+    if not args.skip_validation:
+        return all_stats
+    else:
+        return None
 
 if __name__ == "__main__":
     main() 
