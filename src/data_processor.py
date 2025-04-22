@@ -206,7 +206,8 @@ def custom_collate_fn(batch):
 def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8, num_frames=32, 
                          frame_interval=4, num_workers=4, train_ratio=0.7, val_ratio=0.15):
     """
-    Prepare train, validation, and test dataloaders
+    Prepare train, validation, and test dataloaders with balanced distribution
+    of accident and non-accident videos in each split.
     
     Args:
         accident_dir (str): Directory containing accident videos
@@ -221,10 +222,6 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8, num_frames
     Returns:
         tuple: (train_loader, val_loader, test_loader)
     """
-    # Get all video paths and labels
-    video_paths = []
-    labels = []
-    
     # Check if directories exist
     if not os.path.exists(accident_dir):
         print(f"Warning: Accident directory {accident_dir} does not exist. Creating it.")
@@ -237,41 +234,91 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8, num_frames
     # Process accident videos (label 1)
     accident_videos = [os.path.join(accident_dir, f) for f in os.listdir(accident_dir) 
                       if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))]
-    video_paths.extend(accident_videos)
-    labels.extend([1] * len(accident_videos))
     
     # Process non-accident videos (label 0)
     non_accident_videos = [os.path.join(non_accident_dir, f) for f in os.listdir(non_accident_dir) 
                           if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))]
-    video_paths.extend(non_accident_videos)
-    labels.extend([0] * len(non_accident_videos))
     
-    if len(video_paths) == 0:
+    if len(accident_videos) == 0 and len(non_accident_videos) == 0:
         raise ValueError(f"No video files found in directories {accident_dir} and {non_accident_dir}")
     
     print(f"Found {len(accident_videos)} accident videos and {len(non_accident_videos)} non-accident videos")
     
-    # Create dataset
-    dataset = VideoDataset(
-        video_paths=video_paths,
-        labels=labels,
+    # Calculate test ratio
+    test_ratio = 1.0 - train_ratio - val_ratio
+    
+    # Split accident videos
+    accident_train_size = int(train_ratio * len(accident_videos))
+    accident_val_size = int(val_ratio * len(accident_videos))
+    accident_test_size = len(accident_videos) - accident_train_size - accident_val_size
+    
+    accident_indices = list(range(len(accident_videos)))
+    random.seed(42)  # For reproducibility
+    random.shuffle(accident_indices)
+    
+    accident_train_indices = accident_indices[:accident_train_size]
+    accident_val_indices = accident_indices[accident_train_size:accident_train_size+accident_val_size]
+    accident_test_indices = accident_indices[accident_train_size+accident_val_size:]
+    
+    accident_train = [accident_videos[i] for i in accident_train_indices]
+    accident_val = [accident_videos[i] for i in accident_val_indices]
+    accident_test = [accident_videos[i] for i in accident_test_indices]
+    
+    # Split non-accident videos
+    non_accident_train_size = int(train_ratio * len(non_accident_videos))
+    non_accident_val_size = int(val_ratio * len(non_accident_videos))
+    non_accident_test_size = len(non_accident_videos) - non_accident_train_size - non_accident_val_size
+    
+    non_accident_indices = list(range(len(non_accident_videos)))
+    random.seed(42)  # For reproducibility
+    random.shuffle(non_accident_indices)
+    
+    non_accident_train_indices = non_accident_indices[:non_accident_train_size]
+    non_accident_val_indices = non_accident_indices[non_accident_train_size:non_accident_train_size+non_accident_val_size]
+    non_accident_test_indices = non_accident_indices[non_accident_train_size+non_accident_val_size:]
+    
+    non_accident_train = [non_accident_videos[i] for i in non_accident_train_indices]
+    non_accident_val = [non_accident_videos[i] for i in non_accident_val_indices]
+    non_accident_test = [non_accident_videos[i] for i in non_accident_test_indices]
+    
+    # Combine videos and create labels for each split
+    train_videos = accident_train + non_accident_train
+    train_labels = [1] * len(accident_train) + [0] * len(non_accident_train)
+    
+    val_videos = accident_val + non_accident_val
+    val_labels = [1] * len(accident_val) + [0] * len(non_accident_val)
+    
+    test_videos = accident_test + non_accident_test
+    test_labels = [1] * len(accident_test) + [0] * len(non_accident_test)
+    
+    # Log the distribution
+    print(f"Train set: {len(accident_train)} accident, {len(non_accident_train)} non-accident videos")
+    print(f"Validation set: {len(accident_val)} accident, {len(non_accident_val)} non-accident videos")
+    print(f"Test set: {len(accident_test)} accident, {len(non_accident_test)} non-accident videos")
+    
+    # Create datasets for each split
+    train_dataset = VideoDataset(
+        video_paths=train_videos,
+        labels=train_labels,
         num_frames=num_frames,
         frame_interval=frame_interval
     )
     
-    # Calculate split sizes
-    total_size = len(dataset)
-    train_size = int(train_ratio * total_size)
-    val_size = int(val_ratio * total_size)
-    test_size = total_size - train_size - val_size
-    
-    # Split dataset
-    train_dataset, val_dataset, test_dataset = random_split(
-        dataset, [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42)  # For reproducibility
+    val_dataset = VideoDataset(
+        video_paths=val_videos,
+        labels=val_labels,
+        num_frames=num_frames,
+        frame_interval=frame_interval
     )
     
-    # Create dataloaders with error handling
+    test_dataset = VideoDataset(
+        video_paths=test_videos,
+        labels=test_labels,
+        num_frames=num_frames,
+        frame_interval=frame_interval
+    )
+    
+    # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,

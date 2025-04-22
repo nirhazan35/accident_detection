@@ -11,13 +11,13 @@
         "use_pretrained_features": false
     },
     "data": {
-        "accident_dir": "data/accidents",
-        "non_accident_dir": "data/non_accidents",
+        "accident_dir": "/Users/nirhazan/Documents/VScode/accident_detection/data/processed/accidents",
+        "non_accident_dir": "/Users/nirhazan/Documents/VScode/accident_detection/data/processed/non_accidents",
         "num_frames": 32,
         "frame_interval": 4,
         "train_ratio": 0.7,
-        "val_ratio": 0.15,
-        "test_ratio": 0.15
+        "val_ratio": 0.3,
+        "test_ratio": 0
     },
     "training": {
         "batch_size": 8,
@@ -31,4 +31,4 @@
     "output_dir": "output/accident_detection",
     "test_ratio": 0.15,
     "save_interval": 5
-} 
+}

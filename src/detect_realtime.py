@@ -224,6 +224,19 @@ class AccidentDetector:
         if source == '0' or source == 'webcam':
             cap = cv2.VideoCapture(0)
         else:
+            # For file inputs, standardize the video first
+            if os.path.isfile(source) and source != '0':
+                print(f"Standardizing input video: {source}")
+                # Create temporary file for standardized video
+                std_source = f"{os.path.splitext(source)[0]}_std.mp4"
+                
+                # Standardize the video
+                if standardize_video(source, std_source, resolution=(480, 360), fps=25, bitrate=1500):
+                    print(f"Using standardized video: {std_source}")
+                    source = std_source
+                else:
+                    print(f"Standardization failed, using original video")
+            
             cap = cv2.VideoCapture(source)
         
         # Check if video opened successfully
@@ -248,53 +261,156 @@ class AccidentDetector:
         # Clear frame buffer
         self.frame_buffer.clear()
         
-        # For calculating FPS
-        prev_time = time.time()
-        fps_buffer = deque(maxlen=30)
+        # Start processing loop
+        try:
+            while True:
+                # Read frame
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Process frame
+                result_frame, prediction, pred_time = self.process_frame(frame)
+                
+                # Save frame if writer is initialized
+                if video_writer:
+                    video_writer.write(result_frame)
+                
+                # Display result
+                cv2.imshow('Accident Detection', result_frame)
+                
+                # Print prediction info
+                print(f"Prediction: {prediction:.4f}, Time: {pred_time*1000:.1f}ms", end="\r")
+                
+                # Check for exit key (q or ESC)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q') or key == 27:  # 27 is ESC
+                    break
         
-        while True:
-            # Read frame
-            ret, frame = cap.read()
-            if not ret:
-                break
+        finally:
+            # Clean up
+            if cap:
+                cap.release()
+            if video_writer:
+                video_writer.release()
+                
+            # Remove temporary standardized video if it was created
+            if os.path.isfile(source) and '_std.mp4' in source and os.path.exists(source):
+                try:
+                    # Only remove it if it's a temporary standardized file
+                    if source != '0' and source != 'webcam' and source.endswith('_std.mp4'):
+                        os.remove(source)
+                        print(f"Removed temporary standardized video: {source}")
+                except Exception as e:
+                    print(f"Error removing temporary file: {e}")
+                
+            cv2.destroyAllWindows()
+
+def standardize_video(input_path, output_path, resolution=(480, 360), fps=25, bitrate=1500):
+    """
+    Standardize video dimensions, frame rate, codec and quality
+    
+    Args:
+        input_path (str): Path to input video
+        output_path (str): Path to save standardized video
+        resolution (tuple): Width and height for output video
+        fps (int): Frames per second for output video
+        bitrate (int): Bitrate in kbps for output video
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # First check if ffmpeg is available
+        try:
+            import subprocess
+            subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             
-            # Process frame
-            result_frame, prediction, _ = self.process_frame(frame)
+            # Create output directory if it doesn't exist
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
-            # Calculate FPS
-            curr_time = time.time()
-            fps_buffer.append(1 / (curr_time - prev_time))
-            prev_time = curr_time
-            avg_fps = sum(fps_buffer) / len(fps_buffer) if fps_buffer else 0
+            # Build ffmpeg command
+            width, height = resolution
+            cmd = [
+                'ffmpeg', '-y', '-i', input_path,
+                '-c:v', 'libx264', '-preset', 'medium',
+                '-b:v', f'{bitrate}k',
+                '-vf', f'scale={width}:{height}',
+                '-r', str(fps),
+                '-pix_fmt', 'yuv420p',
+                '-an',  # Remove audio
+                output_path
+            ]
             
-            # Add FPS to frame
-            cv2.putText(
-                result_frame,
-                f"FPS: {avg_fps:.1f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2
+            # Run ffmpeg
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            # Check if output file exists and has content
+            if process.returncode != 0:
+                print(f"ffmpeg error: {process.stderr.decode()}")
+                return False
+                
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                print(f"Output file is empty or doesn't exist: {output_path}")
+                return False
+                
+            return True
+            
+        except (subprocess.SubprocessError, FileNotFoundError):
+            print("ffmpeg not available, falling back to OpenCV")
+            
+            # Fall back to OpenCV if ffmpeg is not available
+            cap = cv2.VideoCapture(input_path)
+            if not cap.isOpened():
+                print(f"Could not open input video: {input_path}")
+                return False
+                
+            # Get video properties
+            width, height = resolution
+            
+            # Define codec
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264 codec
+            
+            # Create output video writer
+            out = cv2.VideoWriter(
+                output_path, fourcc, fps, (width, height)
             )
             
-            # Display frame
-            cv2.imshow('Accident Detection', result_frame)
+            if not out.isOpened():
+                print(f"Could not create output video writer: {output_path}")
+                cap.release()
+                return False
             
-            # Write frame if output path specified
-            if video_writer is not None:
-                video_writer.write(result_frame)
+            # Process each frame
+            frame_count = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
+                # Resize frame
+                resized_frame = cv2.resize(frame, (width, height))
+                
+                # Write frame
+                out.write(resized_frame)
+                frame_count += 1
             
-            # Check for key press
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-        
-        # Release resources
-        cap.release()
-        if video_writer is not None:
-            video_writer.release()
-        cv2.destroyAllWindows()
+            # Release resources
+            cap.release()
+            out.release()
+            
+            # Verify output
+            if frame_count == 0:
+                print(f"No frames were processed: {input_path}")
+                return False
+                
+            return True
+            
+    except Exception as e:
+        print(f"Error standardizing video {input_path}: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        return False
 
 def main():
     parser = argparse.ArgumentParser(description='Real-time accident detection')
