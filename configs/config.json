@@ -8,30 +8,32 @@
         "num_transformer_layers": 2,
         "num_heads": 8,
         "dropout": 0.2,
-        "use_pretrained_features": false
+        "use_pretrained_features": false,
+        "max_sequence_length": 120
     },
     "data": {
-        "accident_dir": "/Users/nirhazan/Documents/VScode/accident_detection/data/processed/accidents",
-        "non_accident_dir": "/Users/nirhazan/Documents/VScode/accident_detection/data/processed/non_accidents",
-        "num_frames": 32,
-        "frame_interval": 4,
+        "accident_dir": "./data/processed/accidents",
+        "non_accident_dir": "./data/processed/non_accidents",
+        "num_frames": 120,
+        "frame_interval": 3,
         "train_ratio": 0.7,
         "val_ratio": 0.2,
         "test_ratio": 0.1
     },
     "training": {
-        "batch_size": 16,
-        "num_epochs": 50,
+        "batch_size": 4,
+        "num_epochs": 100,
         "learning_rate": 0.001,
         "weight_decay": 0.0001,
-        "early_stopping_patience": 7,
+        "early_stopping_patience": 10,
         "save_interval": 5,
-        "num_workers": 4,
+        "num_workers": 0,
         "balance_classes": true,
         "use_weighted_loss": true,
         "use_mixup": true,
         "mixup_alpha": 0.2,
-        "monitor_f1": true
+        "monitor_f1": true,
+        "use_amp": true
     },
     "output_dir": "output/accident_detection",
     "save_interval": 5

@@ -8,13 +8,22 @@ from tqdm import tqdm
 import math
 from torchvision import transforms
 from PIL import Image
+import threading
+import pickle
+import time
+from pathlib import Path
+
+# Global frame cache to avoid redundant disk I/O
+FRAME_CACHE = {}
+CACHE_LOCK = threading.Lock()
+CACHE_SIZE_LIMIT = 500  # Maximum number of videos to cache
 
 class VideoDataset(Dataset):
     """
     Dataset for loading video frames from videos 
     in the accidents and non_accidents folders
     """
-    def __init__(self, video_paths, labels, num_frames=32, frame_interval=4, transform=None, augment=False):
+    def __init__(self, video_paths, labels, num_frames=32, frame_interval=4, transform=None, augment=False, use_cache=True):
         """
         Args:
             video_paths (list): List of video file paths
@@ -23,6 +32,7 @@ class VideoDataset(Dataset):
             frame_interval (int): Interval between frames
             transform (callable, optional): Optional transform to be applied on frames
             augment (bool): Whether to use data augmentation
+            use_cache (bool): Whether to use frame caching
         """
         self.video_paths = video_paths
         self.labels = labels
@@ -30,6 +40,7 @@ class VideoDataset(Dataset):
         self.frame_interval = frame_interval
         self.transform = transform
         self.augment = augment
+        self.use_cache = use_cache
         
         # Define augmentation transforms
         self.aug_transforms = transforms.Compose([
@@ -40,6 +51,44 @@ class VideoDataset(Dataset):
             transforms.ToTensor()
         ])
         
+        # Ensure paths are properly formatted for Windows
+        self.video_paths = [str(Path(path)) for path in self.video_paths]
+        
+        # Pre-check video files and their frame counts to avoid failures during training
+        if self.use_cache:
+            self._validate_videos()
+    
+    def _validate_videos(self):
+        """Pre-check video files to ensure they can be opened and have enough frames"""
+        print("Pre-validating videos...")
+        valid_indices = []
+        for i, video_path in enumerate(tqdm(self.video_paths)):
+            try:
+                # Just check if we can open the video
+                cap = cv2.VideoCapture(video_path)
+                if not cap.isOpened():
+                    print(f"Warning: Cannot open video: {video_path}")
+                    continue
+                
+                # Check frame count
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap.release()
+                
+                if frame_count < 8:  # Minimum frames needed
+                    print(f"Warning: Video too short: {video_path} - {frame_count} frames")
+                    continue
+                    
+                valid_indices.append(i)
+            except Exception as e:
+                print(f"Error validating video {video_path}: {str(e)}")
+                continue
+        
+        # Update dataset with only valid videos
+        if len(valid_indices) < len(self.video_paths):
+            print(f"Removed {len(self.video_paths) - len(valid_indices)} invalid videos")
+            self.video_paths = [self.video_paths[i] for i in valid_indices]
+            self.labels = [self.labels[i] for i in valid_indices]
+        
     def __len__(self):
         return len(self.video_paths)
     
@@ -47,11 +96,12 @@ class VideoDataset(Dataset):
         video_path = self.video_paths[idx]
         label = self.labels[idx]
         
-        # Extract frames from video
+        # Extract frames from video - now returns variable length sequences
         frames = extract_frames(
             video_path, 
             self.num_frames, 
-            self.frame_interval
+            self.frame_interval,
+            use_cache=self.use_cache
         )
         
         # Apply augmentation if enabled
@@ -65,23 +115,38 @@ class VideoDataset(Dataset):
                 aug_frames.append(aug_frame)
             frames = np.array(aug_frames)
         
-        # Convert to tensor [num_frames, C, H, W]
+        # Convert to tensor [seq_len, C, H, W]
         frames_tensor = torch.FloatTensor(frames)
         
         return frames_tensor, label
 
-def extract_frames(video_path, num_frames=32, frame_interval=4):
+def extract_frames(video_path, num_frames=32, frame_interval=3, use_cache=True, max_sequence_length=120):
     """
-    Extract frames from a video file
+    Extract frames from a video file, taking every nth frame (determined by frame_interval)
     
     Args:
         video_path (str): Path to the video file
-        num_frames (int): Number of frames to extract
-        frame_interval (int): Interval between frames
+        num_frames (int): Maximum number of frames to extract (legacy parameter, not strictly used)
+        frame_interval (int): Interval between frames (take every Nth frame)
+        use_cache (bool): Whether to use frame caching
+        max_sequence_length (int): Maximum sequence length to prevent memory issues
     
     Returns:
         list: List of frames as numpy arrays
     """
+    # Use caching to avoid redundant extraction
+    if use_cache:
+        with CACHE_LOCK:
+            cache_key = f"{video_path}_{frame_interval}_{max_sequence_length}"
+            if cache_key in FRAME_CACHE:
+                return FRAME_CACHE[cache_key]
+            
+            # Limit cache size
+            if len(FRAME_CACHE) > CACHE_SIZE_LIMIT:
+                # Remove a random entry to prevent memory leaks
+                for key in random.sample(list(FRAME_CACHE.keys()), 50):
+                    FRAME_CACHE.pop(key, None)
+    
     frames = []
     
     try:
@@ -90,57 +155,56 @@ def extract_frames(video_path, num_frames=32, frame_interval=4):
         if not cap.isOpened():
             print(f"Error opening video file: {video_path}")
             # Return empty frames array with the correct dimensions
-            return np.zeros((num_frames, 3, 224, 224), dtype=np.float32)
+            return np.zeros((max_sequence_length, 3, 224, 224), dtype=np.float32)
         
         # Get video properties
         fps = cap.get(cv2.CAP_PROP_FPS)
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # Calculate frame indices to extract - adjusted to use whatever frames are available
-        if frame_count <= num_frames:
-            # If we have fewer frames than requested, use all available frames
-            indices = np.arange(frame_count)
-        else:
-            # Otherwise sample evenly across the video
-            indices = np.linspace(0, frame_count - 1, num_frames, dtype=int)
+        # Read frames sequentially, taking every frame_interval frames
+        frame_idx = 0
+        frames_read = 0
         
-        # Extract frames at calculated indices
-        for i in indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        while frame_idx < frame_count and frames_read < max_sequence_length:
+            # Set position to the current frame index
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             
             if not ret:
-                print(f"Error reading frame {i} from {video_path}")
-                frames.append(np.zeros((3, 224, 224), dtype=np.float32))
-                continue
-            
-            # Resize frame to 224x224
-            frame = cv2.resize(frame, (224, 224))
-            
-            # Convert BGR to RGB
+                break
+                
+            # Process the frame
+            frame = cv2.resize(frame, (224, 224), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Normalize pixel values to [0, 1]
             frame = frame.astype(np.float32) / 255.0
-            
-            # Convert to [C, H, W] format
-            frame = np.transpose(frame, (2, 0, 1))
+            frame = np.transpose(frame, (2, 0, 1))  # [C, H, W] format
             
             frames.append(frame)
+            frames_read += 1
+            
+            # Move to the next frame index based on the interval
+            frame_idx += frame_interval
         
         cap.release()
         
         # If we couldn't extract enough frames, pad with zeros
-        if len(frames) < num_frames:
-            padding = num_frames - len(frames)
-            for _ in range(padding):
-                frames.append(np.zeros((3, 224, 224), dtype=np.float32))
+        actual_frames = len(frames)
+        if actual_frames == 0:
+            return np.zeros((max_sequence_length, 3, 224, 224), dtype=np.float32)
+            
+        # Create final array with consistent shape
+        frames_array = np.array(frames)
         
-        return np.array(frames)
+        # Cache the result for future use
+        if use_cache:
+            with CACHE_LOCK:
+                FRAME_CACHE[cache_key] = frames_array
+        
+        return frames_array
     
     except Exception as e:
         print(f"Error processing video {video_path}: {str(e)}")
-        return np.zeros((num_frames, 3, 224, 224), dtype=np.float32)
+        return np.zeros((max_sequence_length, 3, 224, 224), dtype=np.float32)
 
 def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8, 
                         num_frames=32, frame_interval=4, 
@@ -164,6 +228,10 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8,
         tuple: (train_loader, val_loader, test_loader)
     """
     print("Loading video paths...")
+    
+    # Handle Windows paths
+    accident_dir = str(Path(accident_dir))
+    non_accident_dir = str(Path(non_accident_dir))
     
     # Get all video paths and labels
     accident_videos = []
@@ -228,6 +296,12 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8,
     print(f"Validation set: {len(val_videos)} videos ({val_labels.count(1)} accident, {val_labels.count(0)} non-accident)")
     print(f"Test set: {len(test_videos)} videos ({test_labels.count(1)} accident, {test_labels.count(0)} non-accident)")
     
+    # Windows optimization: use fewer workers or even 0 workers
+    # This often performs better on Windows
+    if os.name == 'nt':  # Check if running on Windows
+        num_workers = min(num_workers, 2)  # Limit workers on Windows
+        print(f"Windows detected, using {num_workers} workers")
+    
     # Create datasets with augmentation for training
     train_dataset = VideoDataset(
         train_videos, train_labels, num_frames, frame_interval, augment=True
@@ -262,7 +336,9 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8,
             batch_size=batch_size, 
             sampler=sampler,  # Use weighted sampler
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=True if torch.cuda.is_available() else False,  # Only use pin_memory with CUDA
+            prefetch_factor=2 if num_workers > 0 else None,  # Reduce prefetch factor for Windows
+            persistent_workers=True if num_workers > 0 else False  # Keep workers alive between batches
         )
     else:
         train_loader = DataLoader(
@@ -270,7 +346,9 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8,
             batch_size=batch_size, 
             shuffle=True, 
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=True if torch.cuda.is_available() else False,
+            prefetch_factor=2 if num_workers > 0 else None,
+            persistent_workers=True if num_workers > 0 else False
         )
     
     val_loader = DataLoader(
@@ -278,7 +356,9 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8,
         batch_size=batch_size, 
         shuffle=False, 
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True if torch.cuda.is_available() else False,
+        prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=True if num_workers > 0 else False
     )
     
     test_loader = DataLoader(
@@ -286,7 +366,9 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8,
         batch_size=batch_size, 
         shuffle=False, 
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True if torch.cuda.is_available() else False,
+        prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=True if num_workers > 0 else False
     )
     
     return train_loader, val_loader, test_loader 

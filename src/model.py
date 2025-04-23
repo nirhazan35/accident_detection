@@ -7,8 +7,9 @@ from torchvision import models
 class PositionalEncoding(nn.Module):
     """
     Positional encoding for the transformer model
+    Modified to handle longer sequences
     """
-    def __init__(self, d_model, max_seq_length=32):
+    def __init__(self, d_model, max_seq_length=120):
         super(PositionalEncoding, self).__init__()
         
         pe = torch.zeros(max_seq_length, d_model)
@@ -25,20 +26,24 @@ class PositionalEncoding(nn.Module):
         Args:
             x: Tensor, shape [batch_size, seq_len, d_model]
         """
-        return x + self.pe[:, :x.size(1), :]
+        seq_len = x.size(1)
+        return x + self.pe[:, :seq_len, :]
 
 class LSTMTransformerModel(nn.Module):
     """
     LSTM-Transformer model for accident detection
     Uses a pre-trained CNN as feature extractor, followed by LSTM and Transformer layers
+    Modified to handle variable-length sequences
     """
     def __init__(self, cnn_model_name="resnet18", pretrained=True, 
                  feature_dim=512, hidden_dim=256, num_lstm_layers=1, 
                  num_transformer_layers=2, num_heads=4, 
-                 dropout=0.2, use_pretrained_features=False):
+                 dropout=0.2, use_pretrained_features=False,
+                 max_sequence_length=120):
         super(LSTMTransformerModel, self).__init__()
         
         self.use_pretrained_features = use_pretrained_features
+        self.max_sequence_length = max_sequence_length
         
         # Feature extractor (CNN)
         if not use_pretrained_features:
@@ -80,7 +85,7 @@ class LSTMTransformerModel(nn.Module):
         )
         
         # Positional encoding for transformer
-        self.positional_encoding = PositionalEncoding(hidden_dim * 2)  # *2 for bidirectional
+        self.positional_encoding = PositionalEncoding(hidden_dim * 2, max_seq_length=max_sequence_length)  # *2 for bidirectional
         
         # Transformer encoder layer
         transformer_layer = nn.TransformerEncoderLayer(
@@ -131,6 +136,10 @@ class LSTMTransformerModel(nn.Module):
             # If input already contains extracted features
             features = x
         
+        # Create a padding mask for variable-length sequences
+        # For now, we assume all sequences in the batch have the same length
+        # In a real implementation, you would need to track actual sequence lengths
+        
         # LSTM processing
         lstm_out, _ = self.lstm(features)
         
@@ -175,7 +184,8 @@ def get_model(config):
         num_transformer_layers=config.get('num_transformer_layers', 2),
         num_heads=config.get('num_heads', 4),
         dropout=config.get('dropout', 0.2),
-        use_pretrained_features=config.get('use_pretrained_features', False)
+        use_pretrained_features=config.get('use_pretrained_features', False),
+        max_sequence_length=config.get('max_sequence_length', 120)
     )
     
     return model 

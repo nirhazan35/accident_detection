@@ -11,6 +11,8 @@ import logging
 from datetime import datetime
 import matplotlib.pyplot as plt
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, confusion_matrix, average_precision_score
+import gc
+from pathlib import Path
 
 from data_processor import prepare_dataloaders, VideoDataset
 from model import LSTMTransformerModel, get_model
@@ -175,6 +177,49 @@ def mixup_data(x, y, alpha=0.2):
     
     return mixed_x, mixed_y, lam
 
+# For Windows path handling
+def ensure_dir_exists(path):
+    """Ensure directory exists, create if it doesn't"""
+    os.makedirs(path, exist_ok=True)
+    return path
+
+# Add function to clear GPU memory
+def clear_gpu_memory():
+    """Clear GPU memory cache to prevent memory leaks"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+
+# Function to configure CUDA for optimal performance
+def configure_cuda():
+    """Configure CUDA for optimal performance"""
+    if torch.cuda.is_available():
+        # Set device to current device
+        torch.cuda.set_device(torch.cuda.current_device())
+        
+        # Enable TF32 precision on Ampere GPUs (faster than FP32, almost as accurate)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
+        # Set other CUDA optimizations
+        torch.backends.cudnn.benchmark = True  # Find optimal algorithms
+        torch.backends.cudnn.deterministic = False  # Allow non-deterministic algorithms for speed
+        
+        # Print CUDA info for debugging
+        device_name = torch.cuda.get_device_name(0)
+        print(f"CUDA Device: {device_name}")
+        print(f"CUDA Version: {torch.version.cuda}")
+        
+        # Check if we can use Tensor Cores for mixed precision
+        can_use_amp = hasattr(torch.cuda, 'amp') and torch.cuda.is_available()
+        if can_use_amp:
+            print("Mixed precision training available")
+        else:
+            print("Mixed precision training not available")
+        
+        return can_use_amp
+    return False
+
 def train_model(config):
     """
     Train the accident detection model
@@ -182,21 +227,21 @@ def train_model(config):
     Args:
         config (dict): Configuration parameters
     """
-    # Create output directories
-    os.makedirs(config['output_dir'], exist_ok=True)
-    os.makedirs(os.path.join(config['output_dir'], 'checkpoints'), exist_ok=True)
-    os.makedirs(os.path.join(config['output_dir'], 'plots'), exist_ok=True)
+    # Create output directories - use Path for Windows compatibility
+    output_dir = Path(config['output_dir'])
+    ensure_dir_exists(output_dir)
+    ensure_dir_exists(output_dir / 'checkpoints')
+    ensure_dir_exists(output_dir / 'plots')
+    
+    # Configure CUDA
+    can_use_amp = configure_cuda()
     
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Set CUDA benchmark mode for optimal performance on GPU
-    if device.type == 'cuda':
-        torch.backends.cudnn.benchmark = True
-        print(f"CUDA version: {torch.version.cuda}")
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"Available memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    # Set up mixed precision training if available
+    scaler = torch.cuda.amp.GradScaler() if can_use_amp else None
     
     # For performance profiling
     data_loading_time = 0.0
@@ -250,7 +295,7 @@ def train_model(config):
     early_stopping = EarlyStopping(
         patience=config['training']['early_stopping_patience'],
         verbose=True,
-        path=os.path.join(config['output_dir'], 'checkpoints', 'best_model.pt')
+        path=str(Path(config['output_dir']) / 'checkpoints' / 'best_model.pt')
     )
     
     # Training history
@@ -294,19 +339,36 @@ def train_model(config):
             # Forward pass
             optimizer.zero_grad()
             forward_start = time.time()
-            outputs = model(videos)
             
-            # Calculate loss
-            if use_mixup and epoch > 5:
-                loss = criterion(outputs, labels)
+            # Use mixed precision if available
+            if can_use_amp:
+                with torch.cuda.amp.autocast():
+                    outputs = model(videos)
+                    # Calculate loss
+                    if use_mixup and epoch > 5:
+                        loss = criterion(outputs, labels)
+                    else:
+                        loss = criterion(outputs, labels.unsqueeze(1))
             else:
-                loss = criterion(outputs, labels.unsqueeze(1))
+                outputs = model(videos)
+                # Calculate loss
+                if use_mixup and epoch > 5:
+                    loss = criterion(outputs, labels)
+                else:
+                    loss = criterion(outputs, labels.unsqueeze(1))
+                    
             forward_end = time.time()
             
             # Backward pass
             backward_start = time.time()
-            loss.backward()
-            optimizer.step()
+            if can_use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+                
             backward_end = time.time()
             
             # Update timing statistics
@@ -361,9 +423,14 @@ def train_model(config):
             for videos, labels in val_bar:
                 videos, labels = videos.to(device), labels.to(device).float()
                 
-                # Forward pass
-                outputs = model(videos)
-                loss = criterion(outputs, labels.unsqueeze(1))
+                # Forward pass with mixed precision
+                if can_use_amp:
+                    with torch.cuda.amp.autocast():
+                        outputs = model(videos)
+                        loss = criterion(outputs, labels.unsqueeze(1))
+                else:
+                    outputs = model(videos)
+                    loss = criterion(outputs, labels.unsqueeze(1))
                 
                 # Update statistics
                 val_loss += loss.item() * videos.size(0)
@@ -452,6 +519,9 @@ def train_model(config):
                 'val_f1': f1,
                 'val_auc': auc
             }, checkpoint_path)
+        
+        # Clean up GPU memory at the end of each epoch
+        clear_gpu_memory()
     
     # Training time
     total_time = time.time() - start_time
