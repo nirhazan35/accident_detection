@@ -1,0 +1,79 @@
+# Enhanced Model Architectures Configuration
+
+# Common settings
+common:
+  batch_size: 4
+  num_workers: 4
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  scheduler: "cosine"
+  epochs: 50
+  early_stopping_patience: 7
+  positive_weight: 5.0
+  save_dir: "saved_models/enhanced"
+  data_dir: "data"
+  augmentation_level: "strong"
+
+# Base LSTM-Transformer with spatial-channel attention
+spatial_channel_attention:
+  model_type: "lstm_transformer"
+  cnn_model: "resnet50"
+  pretrained: true
+  hidden_dim: 256
+  num_lstm_layers: 1
+  num_transformer_layers: 2
+  num_heads: 4
+  dropout: 0.3
+  max_sequence_length: 120
+  use_3d_cnn: false
+  use_pretrained_features: false
+
+# EfficientNetV2 backbone
+efficientnetv2:
+  model_type: "lstm_transformer"
+  cnn_model: "efficientnet_v2_s"
+  pretrained: true
+  hidden_dim: 256
+  num_lstm_layers: 1
+  num_transformer_layers: 2
+  num_heads: 4
+  dropout: 0.3
+  max_sequence_length: 120
+  use_3d_cnn: false
+  use_pretrained_features: false
+
+# ConvNeXt backbone
+convnext:
+  model_type: "lstm_transformer"
+  cnn_model: "convnext_tiny"
+  pretrained: true
+  hidden_dim: 256
+  num_lstm_layers: 1
+  num_transformer_layers: 2
+  num_heads: 4
+  dropout: 0.3
+  max_sequence_length: 120
+  use_3d_cnn: false
+  use_pretrained_features: false
+
+# 3D CNN with LSTM-Transformer
+slowfast_inspired:
+  model_type: "lstm_transformer"
+  pretrained: true
+  hidden_dim: 256
+  num_lstm_layers: 1
+  num_transformer_layers: 2
+  num_heads: 4
+  dropout: 0.3
+  max_sequence_length: 120
+  use_3d_cnn: true
+  use_pretrained_features: false
+
+# X3D Model
+x3d:
+  model_type: "x3d"
+  input_channels: 3
+  width_factor: 1.0
+  depth_factor: 1.0
+  hidden_dim: 256
+  dropout: 0.3 
