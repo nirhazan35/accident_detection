@@ -90,12 +90,16 @@ def run_model(model_name):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir = f"saved_models/enhanced/{model_name}_{timestamp}"
     
+    # Define data directory
+    data_dir = "data"  # Use the root data directory
+    
     # Build command
     cmd = [
         sys.executable,  # Use the same Python interpreter
         "src/train_enhanced.py",
         "--model", model_name,
         "--save_dir", save_dir,
+        "--data_dir", data_dir,
         "--batch_size", str(batch_size)
     ]
     
@@ -183,16 +187,17 @@ def main():
     os.makedirs("saved_models/enhanced", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
     
-    # Check data paths
-    data_accident_path = "data/processed/accidents"
-    data_non_accident_path = "data/processed/non_accidents"
+    # Check data paths - should match what train_enhanced.py expects
+    data_root = "data"
+    data_accident_path = os.path.join(data_root, "processed/accidents")
+    data_non_accident_path = os.path.join(data_root, "processed/non_accidents")
     
     if not os.path.exists(data_accident_path) or not os.path.exists(data_non_accident_path):
         logger.error(f"Data directories not found. Please ensure {data_accident_path} and {data_non_accident_path} exist.")
         return
     
-    logger.info(f"Found accident videos: {len(os.listdir(data_accident_path))}")
-    logger.info(f"Found non-accident videos: {len(os.listdir(data_non_accident_path))}")
+    logger.info(f"Found accident videos: {len([f for f in os.listdir(data_accident_path) if f.endswith(('.mp4', '.avi', '.mov'))])}")
+    logger.info(f"Found non-accident videos: {len([f for f in os.listdir(data_non_accident_path) if f.endswith(('.mp4', '.avi', '.mov'))])}")
     
     # Optimize CUDA settings
     optimize_cuda_settings()

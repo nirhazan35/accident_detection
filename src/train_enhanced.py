@@ -84,12 +84,17 @@ def main():
     model = get_model(config)
     model.to(device)
     
+    # Define data paths
+    accident_dir = os.path.join(config['data_dir'], 'processed/accidents')
+    non_accident_dir = os.path.join(config['data_dir'], 'processed/non_accidents')
+    
     # Prepare data loaders
     train_loader, val_loader, test_loader = prepare_dataloaders(
-        data_dir=config['data_dir'],
+        accident_dir=accident_dir,
+        non_accident_dir=non_accident_dir,
         batch_size=config['batch_size'],
         num_workers=config['num_workers'],
-        augmentation_level=config['augmentation_level']
+        balance_classes=True
     )
     
     if args.evaluate:

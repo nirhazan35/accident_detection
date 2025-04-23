@@ -4,8 +4,8 @@ echo This will train 5 different architectures sequentially
 echo Started at: %date% %time%
 echo.
 
-REM Activate virtual environment if using one
-REM call path\to\venv\Scripts\activate.bat
+REM Activate virtual environment - adjust path as needed for your system
+call venv\Scripts\activate.bat
 
 REM Run the Python script
 python run_all_models.py
