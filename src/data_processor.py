@@ -1,287 +1,209 @@
 import os
 import cv2
 import numpy as np
-from sklearn.model_selection import train_test_split
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-from PIL import Image
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import random
 from tqdm import tqdm
-import torchvision.transforms as transforms
+import math
+from torchvision import transforms
+from PIL import Image
 
 class VideoDataset(Dataset):
-    """Dataset for loading video frames for accident detection"""
-    
-    def __init__(self, video_paths, labels, num_frames=32, frame_interval=4, transform=None):
+    """
+    Dataset for loading video frames from videos 
+    in the accidents and non_accidents folders
+    """
+    def __init__(self, video_paths, labels, num_frames=32, frame_interval=4, transform=None, augment=False):
         """
-        Initialize VideoDataset
-        
         Args:
-            video_paths (list): List of paths to video files
+            video_paths (list): List of video file paths
             labels (list): List of labels (1 for accident, 0 for non-accident)
             num_frames (int): Number of frames to extract from each video
-            frame_interval (int): Interval between frames to extract
+            frame_interval (int): Interval between frames
             transform (callable, optional): Optional transform to be applied on frames
+            augment (bool): Whether to use data augmentation
         """
         self.video_paths = video_paths
         self.labels = labels
         self.num_frames = num_frames
         self.frame_interval = frame_interval
+        self.transform = transform
+        self.augment = augment
         
-        # Default transform if none provided
-        if transform is None:
-            self.transform = transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
-        else:
-            self.transform = transform
-    
+        # Define augmentation transforms
+        self.aug_transforms = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.RandomRotation(10),
+            transforms.ToTensor()
+        ])
+        
     def __len__(self):
         return len(self.video_paths)
     
     def __getitem__(self, idx):
-        try:
-            video_path = self.video_paths[idx]
-            label = self.labels[idx]
-            
-            # Load video frames
-            frames = self._load_video(video_path)
-            
-            # Convert label to tensor
-            label_tensor = torch.tensor(label, dtype=torch.float)
-            
-            return frames, label_tensor
-        except Exception as e:
-            print(f"Error loading item at index {idx}: {e}")
-            # Return empty frames with the label (if possible)
-            empty_frames = self._generate_empty_frames()
-            try:
-                label_tensor = torch.tensor(self.labels[idx], dtype=torch.float)
-            except:
-                # If we can't even get the label, assume negative class (0)
-                label_tensor = torch.tensor(0.0, dtype=torch.float)
-            
-            return empty_frames, label_tensor
-    
-    def _load_video(self, video_path):
-        """
-        Load video and extract frames
+        video_path = self.video_paths[idx]
+        label = self.labels[idx]
         
-        Args:
-            video_path (str): Path to video file
-            
-        Returns:
-            torch.Tensor: Tensor of shape (num_frames, C, H, W)
-        """
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                print(f"Error: Could not open video {video_path}")
-                return self._generate_empty_frames()
-            
-            # Get video properties
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
-            if frame_count <= 0 or frame_width <= 0 or frame_height <= 0:
-                print(f"Warning: Invalid video properties for {video_path}")
-                cap.release()
-                return self._generate_empty_frames()
-            
-            # Calculate frame indices to extract
-            try:
-                if frame_count <= self.num_frames * self.frame_interval:
-                    # If video has fewer frames than required, use all available frames
-                    indices = np.linspace(0, frame_count - 1, min(self.num_frames, frame_count), dtype=int)
-                    if len(indices) < self.num_frames:
-                        # If we still don't have enough frames, duplicate the last frame
-                        indices = np.pad(indices, (0, self.num_frames - len(indices)), 'edge')
-                else:
-                    # Randomly select a starting point and extract consecutive frames
-                    max_start_idx = frame_count - self.num_frames * self.frame_interval
-                    start_idx = random.randint(0, max(0, max_start_idx))
-                    indices = np.array([min(start_idx + i * self.frame_interval, frame_count - 1) 
-                                        for i in range(self.num_frames)])
-            except Exception as e:
-                print(f"Error calculating frame indices for {video_path}: {e}")
-                cap.release()
-                return self._generate_empty_frames()
-            
-            # Extract frames
-            frames = []
-            for idx in indices:
-                try:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                    ret, frame = cap.read()
-                    
-                    if not ret or frame is None:
-                        # If frame read failed, create a black frame
-                        frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
-                    
-                    # Convert BGR to RGB
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Convert to PIL Image and apply transform
-                    pil_img = Image.fromarray(frame)
-                    transformed_img = self.transform(pil_img)
-                    
-                    frames.append(transformed_img)
-                except Exception as e:
-                    print(f"Error processing frame {idx} from {video_path}: {e}")
-                    # Add a black frame
-                    black_frame = torch.zeros(3, 224, 224)
-                    frames.append(black_frame)
-            
-            cap.release()
-            
-            # Make sure we have exactly num_frames
-            if len(frames) < self.num_frames:
-                # Pad with black frames if necessary
-                black_frame = torch.zeros(3, 224, 224)
-                frames.extend([black_frame] * (self.num_frames - len(frames)))
-            elif len(frames) > self.num_frames:
-                # Truncate if we somehow got too many frames
-                frames = frames[:self.num_frames]
-                
-            # Stack frames into a tensor
-            frames_tensor = torch.stack(frames)
-            
-            return frames_tensor
-            
-        except Exception as e:
-            print(f"Error loading video {video_path}: {e}")
-            return self._generate_empty_frames()
-    
-    def _generate_empty_frames(self):
-        """Generate empty (black) frames as a fallback for corrupted videos"""
-        return torch.zeros(self.num_frames, 3, 224, 224)
+        # Extract frames from video
+        frames = extract_frames(
+            video_path, 
+            self.num_frames, 
+            self.frame_interval
+        )
+        
+        # Apply augmentation if enabled
+        if self.augment and random.random() > 0.5:  # 50% chance of augmentation
+            aug_frames = []
+            for frame in frames:
+                # Convert from [C, H, W] to [H, W, C] for augmentation
+                frame_hwc = np.transpose(frame, (1, 2, 0))
+                # Apply augmentations
+                aug_frame = self.aug_transforms(frame_hwc * 255.0).numpy()  # Scale back to 0-255 for ToPILImage
+                aug_frames.append(aug_frame)
+            frames = np.array(aug_frames)
+        
+        # Convert to tensor [num_frames, C, H, W]
+        frames_tensor = torch.FloatTensor(frames)
+        
+        return frames_tensor, label
 
-def get_transforms(phase):
-    if phase == 'train':
-        return A.Compose([
-            A.Resize(224, 224),
-            A.HorizontalFlip(p=0.5),
-            A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2(),
-        ])
-    else:
-        return A.Compose([
-            A.Resize(224, 224),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2(),
-        ])
-
-def custom_collate_fn(batch):
+def extract_frames(video_path, num_frames=32, frame_interval=4):
     """
-    Custom collate function to handle bad samples in the DataLoader
+    Extract frames from a video file
     
     Args:
-        batch: A list of tuples (video_frames, label)
-        
+        video_path (str): Path to the video file
+        num_frames (int): Number of frames to extract
+        frame_interval (int): Interval between frames
+    
     Returns:
-        tuple: (batch_frames, batch_labels)
+        list: List of frames as numpy arrays
     """
-    # Filter out None values (which might occur if a sample failed completely)
-    batch = [sample for sample in batch if sample is not None]
+    frames = []
     
-    if len(batch) == 0:
-        # If batch is empty, return empty tensors with the expected shapes
-        return torch.zeros(0, 32, 3, 224, 224), torch.zeros(0)
+    try:
+        # Open the video file
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"Error opening video file: {video_path}")
+            # Return empty frames array with the correct dimensions
+            return np.zeros((num_frames, 3, 224, 224), dtype=np.float32)
+        
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Calculate frame indices to extract - adjusted to use whatever frames are available
+        if frame_count <= num_frames:
+            # If we have fewer frames than requested, use all available frames
+            indices = np.arange(frame_count)
+        else:
+            # Otherwise sample evenly across the video
+            indices = np.linspace(0, frame_count - 1, num_frames, dtype=int)
+        
+        # Extract frames at calculated indices
+        for i in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ret, frame = cap.read()
+            
+            if not ret:
+                print(f"Error reading frame {i} from {video_path}")
+                frames.append(np.zeros((3, 224, 224), dtype=np.float32))
+                continue
+            
+            # Resize frame to 224x224
+            frame = cv2.resize(frame, (224, 224))
+            
+            # Convert BGR to RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Normalize pixel values to [0, 1]
+            frame = frame.astype(np.float32) / 255.0
+            
+            # Convert to [C, H, W] format
+            frame = np.transpose(frame, (2, 0, 1))
+            
+            frames.append(frame)
+        
+        cap.release()
+        
+        # If we couldn't extract enough frames, pad with zeros
+        if len(frames) < num_frames:
+            padding = num_frames - len(frames)
+            for _ in range(padding):
+                frames.append(np.zeros((3, 224, 224), dtype=np.float32))
+        
+        return np.array(frames)
     
-    # Split batch into videos and labels
-    videos, labels = zip(*batch)
-    
-    # Stack videos and labels
-    videos_tensor = torch.stack(videos)
-    labels_tensor = torch.stack(labels)
-    
-    return videos_tensor, labels_tensor
+    except Exception as e:
+        print(f"Error processing video {video_path}: {str(e)}")
+        return np.zeros((num_frames, 3, 224, 224), dtype=np.float32)
 
-def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8, num_frames=32, 
-                         frame_interval=4, num_workers=4, train_ratio=0.7, val_ratio=0.15):
+def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8, 
+                        num_frames=32, frame_interval=4, 
+                        train_ratio=0.7, val_ratio=0.3, 
+                        num_workers=4, balance_classes=True):
     """
-    Prepare train, validation, and test dataloaders with balanced distribution
-    of accident and non-accident videos in each split.
+    Prepare data loaders for training, validation, and testing
     
     Args:
         accident_dir (str): Directory containing accident videos
         non_accident_dir (str): Directory containing non-accident videos
         batch_size (int): Batch size
-        num_frames (int): Number of frames to extract from each video
+        num_frames (int): Number of frames to extract per video
         frame_interval (int): Interval between frames
+        train_ratio (float): Ratio of data for training
+        val_ratio (float): Ratio of data for validation
         num_workers (int): Number of workers for data loading
-        train_ratio (float): Proportion of data for training
-        val_ratio (float): Proportion of data for validation
-        
+        balance_classes (bool): Whether to use class balancing
+    
     Returns:
         tuple: (train_loader, val_loader, test_loader)
     """
-    # Check if directories exist
-    if not os.path.exists(accident_dir):
-        print(f"Warning: Accident directory {accident_dir} does not exist. Creating it.")
-        os.makedirs(accident_dir, exist_ok=True)
+    print("Loading video paths...")
     
-    if not os.path.exists(non_accident_dir):
-        print(f"Warning: Non-accident directory {non_accident_dir} does not exist. Creating it.")
-        os.makedirs(non_accident_dir, exist_ok=True)
+    # Get all video paths and labels
+    accident_videos = []
+    for root, _, files in os.walk(accident_dir):
+        for file in files:
+            if file.endswith(('.mp4', '.avi', '.mov')):
+                accident_videos.append(os.path.join(root, file))
     
-    # Process accident videos (label 1)
-    accident_videos = [os.path.join(accident_dir, f) for f in os.listdir(accident_dir) 
-                      if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))]
+    non_accident_videos = []
+    for root, _, files in os.walk(non_accident_dir):
+        for file in files:
+            if file.endswith(('.mp4', '.avi', '.mov')):
+                non_accident_videos.append(os.path.join(root, file))
     
-    # Process non-accident videos (label 0)
-    non_accident_videos = [os.path.join(non_accident_dir, f) for f in os.listdir(non_accident_dir) 
-                          if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))]
+    num_accident = len(accident_videos)
+    num_non_accident = len(non_accident_videos)
     
-    if len(accident_videos) == 0 and len(non_accident_videos) == 0:
-        raise ValueError(f"No video files found in directories {accident_dir} and {non_accident_dir}")
+    print(f"Found {num_accident} accident videos")
+    print(f"Found {num_non_accident} non-accident videos")
     
-    print(f"Found {len(accident_videos)} accident videos and {len(non_accident_videos)} non-accident videos")
+    # Split each class separately to maintain class distribution in splits
+    # Accident videos
+    random.shuffle(accident_videos)
+    accident_train_size = int(num_accident * train_ratio)
+    accident_val_size = int(num_accident * val_ratio)
     
-    # Calculate test ratio
-    test_ratio = 1.0 - train_ratio - val_ratio
+    accident_train = accident_videos[:accident_train_size]
+    accident_val = accident_videos[accident_train_size:accident_train_size + accident_val_size]
+    accident_test = accident_videos[accident_train_size + accident_val_size:]
     
-    # Split accident videos
-    accident_train_size = int(train_ratio * len(accident_videos))
-    accident_val_size = int(val_ratio * len(accident_videos))
-    accident_test_size = len(accident_videos) - accident_train_size - accident_val_size
+    # Non-accident videos
+    random.shuffle(non_accident_videos)
+    non_accident_train_size = int(num_non_accident * train_ratio)
+    non_accident_val_size = int(num_non_accident * val_ratio)
     
-    accident_indices = list(range(len(accident_videos)))
-    random.seed(42)  # For reproducibility
-    random.shuffle(accident_indices)
+    non_accident_train = non_accident_videos[:non_accident_train_size]
+    non_accident_val = non_accident_videos[non_accident_train_size:non_accident_train_size + non_accident_val_size]
+    non_accident_test = non_accident_videos[non_accident_train_size + non_accident_val_size:]
     
-    accident_train_indices = accident_indices[:accident_train_size]
-    accident_val_indices = accident_indices[accident_train_size:accident_train_size+accident_val_size]
-    accident_test_indices = accident_indices[accident_train_size+accident_val_size:]
-    
-    accident_train = [accident_videos[i] for i in accident_train_indices]
-    accident_val = [accident_videos[i] for i in accident_val_indices]
-    accident_test = [accident_videos[i] for i in accident_test_indices]
-    
-    # Split non-accident videos
-    non_accident_train_size = int(train_ratio * len(non_accident_videos))
-    non_accident_val_size = int(val_ratio * len(non_accident_videos))
-    non_accident_test_size = len(non_accident_videos) - non_accident_train_size - non_accident_val_size
-    
-    non_accident_indices = list(range(len(non_accident_videos)))
-    random.seed(42)  # For reproducibility
-    random.shuffle(non_accident_indices)
-    
-    non_accident_train_indices = non_accident_indices[:non_accident_train_size]
-    non_accident_val_indices = non_accident_indices[non_accident_train_size:non_accident_train_size+non_accident_val_size]
-    non_accident_test_indices = non_accident_indices[non_accident_train_size+non_accident_val_size:]
-    
-    non_accident_train = [non_accident_videos[i] for i in non_accident_train_indices]
-    non_accident_val = [non_accident_videos[i] for i in non_accident_val_indices]
-    non_accident_test = [non_accident_videos[i] for i in non_accident_test_indices]
-    
-    # Combine videos and create labels for each split
+    # Combine train, val, test sets
     train_videos = accident_train + non_accident_train
     train_labels = [1] * len(accident_train) + [0] * len(non_accident_train)
     
@@ -291,128 +213,80 @@ def prepare_dataloaders(accident_dir, non_accident_dir, batch_size=8, num_frames
     test_videos = accident_test + non_accident_test
     test_labels = [1] * len(accident_test) + [0] * len(non_accident_test)
     
-    # Log the distribution
-    print(f"Train set: {len(accident_train)} accident, {len(non_accident_train)} non-accident videos")
-    print(f"Validation set: {len(accident_val)} accident, {len(non_accident_val)} non-accident videos")
-    print(f"Test set: {len(accident_test)} accident, {len(non_accident_test)} non-accident videos")
+    # Shuffle
+    train_indices = list(range(len(train_videos)))
+    random.shuffle(train_indices)
+    train_videos = [train_videos[i] for i in train_indices]
+    train_labels = [train_labels[i] for i in train_indices]
     
-    # Create datasets for each split
+    val_indices = list(range(len(val_videos)))
+    random.shuffle(val_indices)
+    val_videos = [val_videos[i] for i in val_indices]
+    val_labels = [val_labels[i] for i in val_indices]
+    
+    print(f"Train set: {len(train_videos)} videos ({train_labels.count(1)} accident, {train_labels.count(0)} non-accident)")
+    print(f"Validation set: {len(val_videos)} videos ({val_labels.count(1)} accident, {val_labels.count(0)} non-accident)")
+    print(f"Test set: {len(test_videos)} videos ({test_labels.count(1)} accident, {test_labels.count(0)} non-accident)")
+    
+    # Create datasets with augmentation for training
     train_dataset = VideoDataset(
-        video_paths=train_videos,
-        labels=train_labels,
-        num_frames=num_frames,
-        frame_interval=frame_interval
+        train_videos, train_labels, num_frames, frame_interval, augment=True
     )
     
     val_dataset = VideoDataset(
-        video_paths=val_videos,
-        labels=val_labels,
-        num_frames=num_frames,
-        frame_interval=frame_interval
+        val_videos, val_labels, num_frames, frame_interval, augment=False
     )
     
     test_dataset = VideoDataset(
-        video_paths=test_videos,
-        labels=test_labels,
-        num_frames=num_frames,
-        frame_interval=frame_interval
+        test_videos, test_labels, num_frames, frame_interval, augment=False
     )
     
-    # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        collate_fn=custom_collate_fn,
-        drop_last=False
-    )
+    # Create weighted sampler for training to address class imbalance
+    if balance_classes:
+        # Calculate class weights
+        class_counts = [train_labels.count(0), train_labels.count(1)]
+        weights = 1.0 / torch.tensor(class_counts, dtype=torch.float)
+        
+        # Assign weight to each sample
+        sample_weights = [weights[label] for label in train_labels]
+        
+        # Create sampler
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_labels),
+            replacement=True
+        )
+        
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            sampler=sampler,  # Use weighted sampler
+            num_workers=num_workers,
+            pin_memory=True
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            num_workers=num_workers,
+            pin_memory=True
+        )
     
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
         num_workers=num_workers,
-        pin_memory=True,
-        collate_fn=custom_collate_fn,
-        drop_last=False
+        pin_memory=True
     )
     
     test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
+        test_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
         num_workers=num_workers,
-        pin_memory=True,
-        collate_fn=custom_collate_fn,
-        drop_last=False
+        pin_memory=True
     )
     
-    return train_loader, val_loader, test_loader
-
-def extract_video_features(video_path, feature_extractor, device, num_frames=32, frame_interval=4):
-    """
-    Extract features from a video using the feature extractor
-    
-    Args:
-        video_path (str): Path to video file
-        feature_extractor (nn.Module): Feature extractor model
-        device (torch.device): Device to run inference on
-        num_frames (int): Number of frames to extract
-        frame_interval (int): Interval between frames
-        
-    Returns:
-        torch.Tensor: Extracted features of shape (num_frames, feature_dim)
-    """
-    # Set up transform
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    
-    # Load video
-    cap = cv2.VideoCapture(video_path)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    # Calculate frame indices to extract
-    if frame_count <= num_frames * frame_interval:
-        indices = np.linspace(0, frame_count - 1, num_frames, dtype=int)
-    else:
-        max_start_idx = frame_count - num_frames * frame_interval
-        start_idx = random.randint(0, max_start_idx)
-        indices = np.array([start_idx + i * frame_interval for i in range(num_frames)])
-    
-    # Extract frames
-    frames = []
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = cap.read()
-        
-        if not ret:
-            # If frame read failed, create a black frame
-            frame_height, frame_width = 224, 224
-            frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
-        
-        # Convert BGR to RGB
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Convert to PIL Image and apply transform
-        pil_img = Image.fromarray(frame)
-        transformed_img = transform(pil_img)
-        
-        frames.append(transformed_img)
-    
-    cap.release()
-    
-    # Stack frames into a tensor and move to device
-    frames_tensor = torch.stack(frames).to(device)
-    
-    # Extract features
-    with torch.no_grad():
-        feature_extractor.eval()
-        features = feature_extractor(frames_tensor.unsqueeze(0))
-        features = features.squeeze(0)
-    
-    return features 
+    return train_loader, val_loader, test_loader 

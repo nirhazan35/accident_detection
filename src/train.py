@@ -10,7 +10,7 @@ from tqdm import tqdm
 import logging
 from datetime import datetime
 import matplotlib.pyplot as plt
-from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, confusion_matrix
+from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, confusion_matrix, average_precision_score
 
 from data_processor import prepare_dataloaders, VideoDataset
 from model import LSTMTransformerModel, get_model
@@ -126,6 +126,55 @@ class EarlyStopping:
         torch.save(model.state_dict(), self.path)
         self.val_loss_min = val_loss
 
+class WeightedBCELoss(nn.Module):
+    """
+    Binary Cross Entropy Loss with class weights
+    """
+    def __init__(self, pos_weight=1.0, reduction='mean'):
+        super(WeightedBCELoss, self).__init__()
+        self.pos_weight = pos_weight
+        self.reduction = reduction
+        
+    def forward(self, outputs, targets):
+        # Weight matrix: positive samples get more weight
+        weight = torch.ones_like(targets)
+        weight[targets == 1] = self.pos_weight
+        
+        # Binary cross entropy
+        loss = nn.functional.binary_cross_entropy(
+            outputs, 
+            targets, 
+            weight=weight, 
+            reduction=self.reduction
+        )
+        
+        return loss
+
+def mixup_data(x, y, alpha=0.2):
+    """
+    Performs mixup augmentation on the batch.
+    
+    Args:
+        x: input features [batch_size, ...]
+        y: input labels [batch_size, ...]
+        alpha: mixup interpolation coefficient
+        
+    Returns:
+        mixed_x, mixed_y, lambda
+    """
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(x.device)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    mixed_y = lam * y + (1 - lam) * y[index]
+    
+    return mixed_x, mixed_y, lam
+
 def train_model(config):
     """
     Train the accident detection model
@@ -142,6 +191,18 @@ def train_model(config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # Set CUDA benchmark mode for optimal performance on GPU
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"Available memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    
+    # For performance profiling
+    data_loading_time = 0.0
+    forward_time = 0.0
+    backward_time = 0.0
+    
     # Prepare dataloaders
     train_loader, val_loader, test_loader = prepare_dataloaders(
         accident_dir=config['data']['accident_dir'],
@@ -151,24 +212,38 @@ def train_model(config):
         frame_interval=config['data']['frame_interval'],
         train_ratio=config['data']['train_ratio'],
         val_ratio=config['data']['val_ratio'],
-        num_workers=config['training']['num_workers']
+        num_workers=config['training']['num_workers'],
+        balance_classes=config.get('training', {}).get('balance_classes', True)
     )
     
     # Get model
     model = get_model(config['model'])
     model = model.to(device)
     
-    # Loss function and optimizer
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'], weight_decay=config['training']['weight_decay'])
+    # Calculate class weights for loss function
+    if config.get('training', {}).get('use_weighted_loss', True):
+        # If we know the exact class distribution
+        num_accident = len(os.listdir(config['data']['accident_dir']))
+        num_non_accident = len(os.listdir(config['data']['non_accident_dir']))
+        pos_weight = num_non_accident / num_accident if num_accident > 0 else 1.0
+        print(f"Using weighted loss with positive weight: {pos_weight:.2f}")
+        criterion = WeightedBCELoss(pos_weight=pos_weight)
+    else:
+        criterion = nn.BCELoss()
+    
+    # Optimizer
+    optimizer = optim.Adam(
+        model.parameters(), 
+        lr=config['training']['learning_rate'], 
+        weight_decay=config['training']['weight_decay']
+    )
     
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='min', 
         factor=0.5, 
-        patience=5, 
-        verbose=True
+        patience=5
     )
     
     # Early stopping
@@ -183,8 +258,17 @@ def train_model(config):
         'train_loss': [],
         'val_loss': [],
         'train_acc': [],
-        'val_acc': []
+        'val_acc': [],
+        'val_f1': [],
+        'val_precision': [],
+        'val_recall': [],
+        'val_auc': [],
+        'val_ap': []  # Average Precision
     }
+    
+    # Use mixup augmentation
+    use_mixup = config.get('training', {}).get('use_mixup', True)
+    mixup_alpha = config.get('training', {}).get('mixup_alpha', 0.2)
     
     # Training loop
     start_time = time.time()
@@ -197,21 +281,49 @@ def train_model(config):
         
         train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['training']['num_epochs']} [Train]")
         for videos, labels in train_bar:
+            # Measure data loading time
+            data_load_end = time.time()
+            
             videos, labels = videos.to(device), labels.to(device).float()
+            
+            # Apply mixup augmentation
+            if use_mixup and epoch > 5:  # Start mixup after 5 epochs of regular training
+                videos, labels, _ = mixup_data(videos, labels.unsqueeze(1), alpha=mixup_alpha)
+                labels = labels.squeeze(1)
             
             # Forward pass
             optimizer.zero_grad()
+            forward_start = time.time()
             outputs = model(videos)
-            loss = criterion(outputs, labels.unsqueeze(1))
+            
+            # Calculate loss
+            if use_mixup and epoch > 5:
+                loss = criterion(outputs, labels)
+            else:
+                loss = criterion(outputs, labels.unsqueeze(1))
+            forward_end = time.time()
             
             # Backward pass
+            backward_start = time.time()
             loss.backward()
             optimizer.step()
+            backward_end = time.time()
+            
+            # Update timing statistics
+            forward_time += forward_end - forward_start
+            backward_time += backward_end - backward_start
             
             # Update statistics
             train_loss += loss.item() * videos.size(0)
             predicted = (outputs > 0.5).float()
-            train_correct += (predicted == labels.unsqueeze(1)).sum().item()
+            
+            if use_mixup and epoch > 5:
+                # For mixup, use the dominant class for accuracy calculation
+                rounded_labels = (labels > 0.5).float()
+                train_correct += (predicted == rounded_labels).sum().item()
+            else:
+                train_correct += (predicted == labels.unsqueeze(1)).sum().item()
+                
             train_total += labels.size(0)
             
             # Update progress bar
@@ -219,6 +331,18 @@ def train_model(config):
                 'loss': f"{loss.item():.4f}",
                 'acc': f"{train_correct/train_total:.4f}"
             })
+            
+            # Record data loading time for next iteration
+            data_loading_time += data_load_end - time.time()
+        
+        # Print timing info after each epoch
+        if epoch == 0 or (epoch + 1) % 5 == 0:
+            print(f"\nTiming Info (Epoch {epoch+1}):")
+            print(f"  Data loading time: {data_loading_time:.2f}s")
+            print(f"  Forward pass time: {forward_time:.2f}s")
+            print(f"  Backward pass time: {backward_time:.2f}s")
+            print(f"  Total compute time: {forward_time + backward_time:.2f}s")
+            print(f"  Ratio - Data loading : Computing = {data_loading_time / (forward_time + backward_time):.2f}")
         
         train_loss = train_loss / len(train_loader.dataset)
         train_acc = train_correct / train_total
@@ -229,6 +353,7 @@ def train_model(config):
         val_correct = 0
         val_total = 0
         val_preds = []
+        val_preds_raw = []  # For ROC-AUC and PR curves
         val_targets = []
         
         with torch.no_grad():
@@ -247,7 +372,8 @@ def train_model(config):
                 val_total += labels.size(0)
                 
                 # Store predictions and targets for metrics
-                val_preds.extend(outputs.cpu().numpy())
+                val_preds.extend(predicted.cpu().numpy())
+                val_preds_raw.extend(outputs.cpu().numpy())
                 val_targets.extend(labels.cpu().numpy())
                 
                 # Update progress bar
@@ -262,34 +388,49 @@ def train_model(config):
         # Update learning rate
         scheduler.step(val_loss)
         
+        # Calculate evaluation metrics
+        val_preds_binary = np.array(val_preds).reshape(-1) > 0.5
+        val_preds_raw = np.array(val_preds_raw).reshape(-1)
+        val_targets = np.array(val_targets)
+        
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            val_targets, val_preds_binary, average='binary', zero_division=0
+        )
+        
+        try:
+            auc = roc_auc_score(val_targets, val_preds_raw)
+        except:
+            auc = 0.0
+            
+        try:
+            ap = average_precision_score(val_targets, val_preds_raw)
+        except:
+            ap = 0.0
+        
         # Update history
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
         history['train_acc'].append(train_acc)
         history['val_acc'].append(val_acc)
+        history['val_precision'].append(precision)
+        history['val_recall'].append(recall)
+        history['val_f1'].append(f1)
+        history['val_auc'].append(auc)
+        history['val_ap'].append(ap)
         
         # Print epoch summary
         print(f"Epoch {epoch+1}/{config['training']['num_epochs']} - "
               f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
               f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
         
-        # Calculate additional metrics
-        val_preds_binary = (np.array(val_preds) > 0.5).astype(int)
-        val_targets = np.array(val_targets)
+        print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {auc:.4f}, AP: {ap:.4f}")
         
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            val_targets, val_preds_binary, average='binary'
-        )
-        
-        try:
-            auc = roc_auc_score(val_targets, val_preds)
-        except:
-            auc = 0.0
-        
-        print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {auc:.4f}")
-        
-        # Early stopping
-        early_stopping(val_loss, model)
+        # Early stopping - now monitoring F1 score instead of just loss
+        if config.get('training', {}).get('monitor_f1', True):
+            early_stopping(-f1, model)  # Negative because we want to maximize F1
+        else:
+            early_stopping(val_loss, model)
+            
         if early_stopping.early_stop:
             print("Early stopping triggered")
             break
@@ -307,7 +448,9 @@ def train_model(config):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'train_loss': train_loss,
-                'val_loss': val_loss
+                'val_loss': val_loss,
+                'val_f1': f1,
+                'val_auc': auc
             }, checkpoint_path)
     
     # Training time
@@ -428,31 +571,49 @@ def evaluate_model(model, test_loader, device, output_dir):
     return metrics
 
 def plot_history(history, output_dir):
-    """
-    Plot training history
+    """Plot training history metrics"""
+    plt.figure(figsize=(15, 10))
     
-    Args:
-        history (dict): Training history
-        output_dir (str): Directory to save plots
-    """
     # Plot loss
-    plt.figure(figsize=(10, 4))
-    plt.subplot(1, 2, 1)
-    plt.plot(history['train_loss'], label='Train')
-    plt.plot(history['val_loss'], label='Validation')
+    plt.subplot(2, 2, 1)
+    plt.plot(history['train_loss'], label='Train Loss')
+    plt.plot(history['val_loss'], label='Validation Loss')
     plt.title('Loss')
-    plt.xlabel('Epochs')
+    plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
+    plt.grid(True)
     
     # Plot accuracy
-    plt.subplot(1, 2, 2)
-    plt.plot(history['train_acc'], label='Train')
-    plt.plot(history['val_acc'], label='Validation')
+    plt.subplot(2, 2, 2)
+    plt.plot(history['train_acc'], label='Train Accuracy')
+    plt.plot(history['val_acc'], label='Validation Accuracy')
     plt.title('Accuracy')
-    plt.xlabel('Epochs')
+    plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
     plt.legend()
+    plt.grid(True)
+    
+    # Plot F1, Precision, Recall
+    plt.subplot(2, 2, 3)
+    plt.plot(history['val_precision'], label='Precision')
+    plt.plot(history['val_recall'], label='Recall')
+    plt.plot(history['val_f1'], label='F1 Score')
+    plt.title('Precision, Recall, F1')
+    plt.xlabel('Epoch')
+    plt.ylabel('Score')
+    plt.legend()
+    plt.grid(True)
+    
+    # Plot AUC and AP
+    plt.subplot(2, 2, 4)
+    plt.plot(history['val_auc'], label='ROC AUC')
+    plt.plot(history['val_ap'], label='Average Precision')
+    plt.title('ROC AUC and Average Precision')
+    plt.xlabel('Epoch')
+    plt.ylabel('Score')
+    plt.legend()
+    plt.grid(True)
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'plots', 'training_history.png'))
